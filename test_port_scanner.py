@@ -1,7 +1,9 @@
 import unittest
+import errno
 from cli import parse_ports, parse_port_range
 from models import ScanType, PortState, PortResult
 from service_identifier import ServiceIdentifier, COMMON_PORTS
+from port_scanner import _classify_connect_error
 
 
 class TestPortParsing(unittest.TestCase):
@@ -49,6 +51,38 @@ class TestModels(unittest.TestCase):
         )
         self.assertIn("80: HTTP", str(result))
         self.assertIn("12.35ms", str(result))
+
+
+class TestConnectErrorClassification(unittest.TestCase):
+    def test_success_is_open(self):
+        self.assertEqual(_classify_connect_error(0), PortState.OPEN)
+
+    def test_econnrefused_is_closed_posix(self):
+        self.assertEqual(_classify_connect_error(errno.ECONNREFUSED), PortState.CLOSED)
+
+    def test_econnrefused_is_closed_windows(self):
+        self.assertEqual(_classify_connect_error(10061), PortState.CLOSED)
+
+    def test_etimedout_is_filtered_posix(self):
+        self.assertEqual(_classify_connect_error(errno.ETIMEDOUT), PortState.FILTERED)
+
+    def test_etimedout_is_filtered_windows(self):
+        self.assertEqual(_classify_connect_error(10060), PortState.FILTERED)
+
+    def test_ehostunreach_is_filtered_posix(self):
+        self.assertEqual(_classify_connect_error(errno.EHOSTUNREACH), PortState.FILTERED)
+
+    def test_ehostunreach_is_filtered_windows(self):
+        self.assertEqual(_classify_connect_error(10065), PortState.FILTERED)
+
+    def test_enetunreach_is_filtered_posix(self):
+        self.assertEqual(_classify_connect_error(errno.ENETUNREACH), PortState.FILTERED)
+
+    def test_enetunreach_is_filtered_windows(self):
+        self.assertEqual(_classify_connect_error(10051), PortState.FILTERED)
+
+    def test_unknown_error_defaults_to_closed(self):
+        self.assertEqual(_classify_connect_error(99999), PortState.CLOSED)
 
 
 class TestServiceIdentifier(unittest.TestCase):

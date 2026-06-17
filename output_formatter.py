@@ -49,15 +49,14 @@ class OutputFormatter:
 
         if not result.open_ports:
             print("No open ports found.")
-            return
+        else:
+            print(f"\nFound {len(result.open_ports)} open port(s):\n")
 
-        print(f"\nFound {len(result.open_ports)} open port(s):\n")
+            print(f"{'PORT':<8} {'STATE':<10} {'SERVICE':<20} {'RESPONSE TIME':<15}")
+            print(f"{'-' * 8} {'-' * 10} {'-' * 20} {'-' * 15}")
 
-        print(f"{'PORT':<8} {'STATE':<10} {'SERVICE':<20} {'RESPONSE TIME':<15}")
-        print(f"{'-' * 8} {'-' * 10} {'-' * 20} {'-' * 15}")
-
-        for port_result in result.open_ports:
-            self._print_port_row(port_result)
+            for port_result in result.open_ports:
+                self._print_port_row(port_result)
 
         if self.verbose >= 1:
             self._print_verbose_details(result)

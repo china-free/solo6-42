@@ -1,5 +1,6 @@
 import socket
 import time
+import errno
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Callable
@@ -7,6 +8,31 @@ from abc import ABC, abstractmethod
 
 from models import PortResult, PortState, HostScanResult, ScanType
 from service_identifier import ServiceIdentifier
+
+
+def _classify_connect_error(error_code: int) -> PortState:
+    if error_code == 0:
+        return PortState.OPEN
+
+    closed_codes = (
+        errno.ECONNREFUSED,
+        getattr(errno, "WSAECONNREFUSED", 10061),
+    )
+    filtered_codes = (
+        errno.ETIMEDOUT,
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+        getattr(errno, "WSAETIMEDOUT", 10060),
+        getattr(errno, "WSAEHOSTUNREACH", 10065),
+        getattr(errno, "WSAENETUNREACH", 10051),
+    )
+
+    if error_code in closed_codes:
+        return PortState.CLOSED
+    if error_code in filtered_codes:
+        return PortState.FILTERED
+
+    return PortState.CLOSED
 
 
 class PortScannerBase(ABC):
@@ -84,6 +110,7 @@ class PortScannerBase(ABC):
 class TCPConnectScanner(PortScannerBase):
     def _scan_port(self, host: str, port: int) -> PortResult:
         result = PortResult(port=port, state=PortState.CLOSED)
+        connect_result = None
 
         try:
             start_time = time.perf_counter()
@@ -105,10 +132,18 @@ class TCPConnectScanner(PortScannerBase):
                         result.service = service
                         result.banner = banner
                 else:
-                    result.state = PortState.FILTERED
+                    result.state = _classify_connect_error(connect_result)
 
         except socket.timeout:
             result.state = PortState.FILTERED
+        except ConnectionRefusedError:
+            result.state = PortState.CLOSED
+        except (BlockingIOError, OSError) as e:
+            error_code = getattr(e, "errno", None)
+            if error_code is not None:
+                result.state = _classify_connect_error(error_code)
+            else:
+                result.state = PortState.CLOSED
         except Exception:
             result.state = PortState.CLOSED
 
