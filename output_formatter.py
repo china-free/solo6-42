@@ -1,5 +1,6 @@
 import sys
-from typing import List
+from typing import List, Dict, Set
+from collections import defaultdict
 from models import HostScanResult, PortResult, PortState
 
 
@@ -7,6 +8,11 @@ class OutputFormatter:
     def __init__(self, verbose: int = 0):
         self.verbose = verbose
         self._last_progress_line = ""
+        self._batch_mode = False
+        self._total_hosts = 0
+        self._ports_per_host = 0
+        self._hosts_done = 0
+        self._cumulative_open = 0
 
     def print_header(self, hosts: List[str], ports: List[int], scan_type: str) -> None:
         print("=" * 70)
@@ -19,16 +25,54 @@ class OutputFormatter:
         print("=" * 70)
         print()
 
+    def set_batch_mode(self, total_hosts: int, ports_per_host: int) -> None:
+        self._batch_mode = total_hosts > 1
+        self._total_hosts = total_hosts
+        self._ports_per_host = ports_per_host
+        self._hosts_done = 0
+        self._cumulative_open = 0
+
+    def start_host(self, host_index: int, host: str) -> None:
+        self._hosts_done = host_index - 1
+        self.clear_progress()
+        if self._batch_mode:
+            print(f"\n[{host_index}/{self._total_hosts}] Scanning: {host}")
+
+    def finish_host(self, open_count: int) -> None:
+        self._hosts_done += 1
+        self._cumulative_open += open_count
+
     def print_progress(self, current: int, total: int, open_count: int) -> None:
         if total == 0:
             return
 
-        percent = (current / total) * 100
-        bar_length = 40
-        filled = int(bar_length * current / total)
-        bar = "█" * filled + "░" * (bar_length - filled)
+        if not self._batch_mode:
+            percent = (current / total) * 100
+            bar_length = 40
+            filled = int(bar_length * current / total)
+            bar = "█" * filled + "░" * (bar_length - filled)
+            progress_line = f"\rScanning: |{bar}| {percent:5.1f}% ({current}/{total}) Open: {open_count}"
+        else:
+            overall_done = self._hosts_done * total + current
+            overall_total = self._total_hosts * total
+            overall_percent = (overall_done / overall_total) * 100 if overall_total > 0 else 0
 
-        progress_line = f"\rScanning: |{bar}| {percent:5.1f}% ({current}/{total}) Open: {open_count}"
+            bar_length = 30
+            current_filled = int(bar_length * current / total)
+            current_bar = "█" * current_filled + "░" * (bar_length - current_filled)
+            current_pct = (current / total) * 100
+
+            overall_filled = int(bar_length * overall_done / overall_total) if overall_total > 0 else 0
+            overall_bar = "█" * overall_filled + "░" * (bar_length - overall_filled)
+
+            cumulative_total = self._cumulative_open + open_count
+
+            progress_line = (
+                f"\r  当前主机: |{current_bar}| {current_pct:5.1f}%  "
+                f"总体: |{overall_bar}| {overall_percent:5.1f}%  "
+                f"主机: {self._hosts_done + 1}/{self._total_hosts}  "
+                f"累计开放: {cumulative_total}"
+            )
 
         sys.stdout.write(progress_line)
         sys.stdout.flush()
@@ -117,29 +161,112 @@ class OutputFormatter:
                 if len(port_nums) > 50:
                     print(f"  ... and {len(port_nums) - 50} more")
 
-    def print_summary(self, all_results: List[HostScanResult]) -> None:
+    def print_batch_summary(self, all_results: List[HostScanResult]) -> None:
         self.clear_progress()
         print(f"\n{'=' * 70}")
-        print("SCAN SUMMARY")
+        print("BATCH SCAN SUMMARY")
         print(f"{'=' * 70}")
-        print(f"\nEnd time:     {self._get_current_time()}")
+        print(f"\n结束时间:   {self._get_current_time()}")
 
         total_open = sum(len(r.open_ports) for r in all_results)
         total_scanned = sum(len(r.ports) for r in all_results)
 
-        print(f"Total hosts:  {len(all_results)}")
-        print(f"Total ports:  {total_scanned}")
-        print(f"Total open:   {total_open}")
-        print()
+        print(f"扫描主机:   {len(all_results)}")
+        print(f"扫描端口:   {total_scanned}")
+        print(f"开放端口:   {total_open}")
 
-        for result in all_results:
-            open_ports = [str(r.port) for r in result.open_ports]
-            if open_ports:
-                print(f"  {result.host}: {len(open_ports)} open - {', '.join(open_ports)}")
-            else:
-                print(f"  {result.host}: No open ports")
+        if len(all_results) > 1:
+            print()
+            self._print_summary_by_host(all_results)
+            print()
+            self._print_summary_by_port(all_results)
+            print()
+            self._print_summary_by_service(all_results)
+        else:
+            print()
+            self._print_summary_by_host(all_results)
 
         print(f"\n{'=' * 70}")
+
+    def _print_summary_by_host(self, all_results: List[HostScanResult]) -> None:
+        print(f"{'─' * 70}")
+        print("【按主机查看】")
+        print(f"{'─' * 70}")
+        print(f"{'主机':<25} {'开放数':<8} {'开放端口列表'}")
+        print(f"{'-' * 25} {'-' * 8} {'-' * 37}")
+
+        for result in all_results:
+            host_display = result.host[:24] if len(result.host) > 24 else result.host
+            open_ports = [str(r.port) for r in result.open_ports]
+            if open_ports:
+                ports_str = ", ".join(open_ports[:10])
+                if len(open_ports) > 10:
+                    ports_str += f" ... (+{len(open_ports) - 10})"
+                print(f"{host_display:<25} {len(open_ports):<8} {ports_str}")
+            else:
+                print(f"{host_display:<25} 0        (无开放端口)")
+
+    def _print_summary_by_port(self, all_results: List[HostScanResult]) -> None:
+        port_to_hosts: Dict[int, Set[str]] = defaultdict(set)
+        port_to_service: Dict[int, str] = {}
+
+        for result in all_results:
+            for port_result in result.open_ports:
+                port_to_hosts[port_result.port].add(result.host)
+                if port_result.port not in port_to_service:
+                    port_to_service[port_result.port] = port_result.service
+
+        print(f"{'─' * 70}")
+        print("【按端口查看】")
+        print(f"{'─' * 70}")
+        print(f"{'端口':<10} {'服务':<20} {'开放主机数':<10} {'主机列表'}")
+        print(f"{'-' * 10} {'-' * 20} {'-' * 10} {'-' * 30}")
+
+        sorted_ports = sorted(port_to_hosts.keys(), key=lambda p: (-len(port_to_hosts[p]), p))
+
+        for port in sorted_ports:
+            hosts = port_to_hosts[port]
+            service = port_to_service.get(port, "unknown")
+            service_display = service[:19] if len(service) > 19 else service
+
+            host_list = sorted(hosts)
+            hosts_str = ", ".join(h[:12] for h in host_list[:3])
+            if len(hosts) > 3:
+                hosts_str += f" ... (+{len(hosts) - 3})"
+
+            print(f"{port:<10} {service_display:<20} {len(hosts):<10} {hosts_str}")
+
+    def _print_summary_by_service(self, all_results: List[HostScanResult]) -> None:
+        service_to_ports: Dict[str, Set[int]] = defaultdict(set)
+        service_to_hosts: Dict[str, Set[str]] = defaultdict(set)
+        service_count: Dict[str, int] = defaultdict(int)
+
+        for result in all_results:
+            for port_result in result.open_ports:
+                service = port_result.service or "unknown"
+                service_to_ports[service].add(port_result.port)
+                service_to_hosts[service].add(result.host)
+                service_count[service] += 1
+
+        print(f"{'─' * 70}")
+        print("【按服务查看】")
+        print(f"{'─' * 70}")
+        print(f"{'服务':<22} {'实例数':<8} {'主机数':<8} {'端口列表'}")
+        print(f"{'-' * 22} {'-' * 8} {'-' * 8} {'-' * 32}")
+
+        sorted_services = sorted(service_count.keys(), key=lambda s: (-service_count[s], s))
+
+        for service in sorted_services:
+            count = service_count[service]
+            hosts = service_to_hosts[service]
+            ports = sorted(service_to_ports[service])
+            service_display = service[:21] if len(service) > 21 else service
+
+            ports_str = ", ".join(str(p) for p in ports[:5])
+            if len(ports) > 5:
+                ports_str += f" ... (+{len(ports) - 5})"
+
+            print(f"{service_display:<22} {count:<8} {len(hosts):<8} {ports_str}")
 
     @staticmethod
     def _get_current_time() -> str:

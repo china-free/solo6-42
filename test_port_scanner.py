@@ -1,9 +1,12 @@
 import unittest
 import errno
+import io
+import sys
 from cli import parse_ports, parse_port_range
-from models import ScanType, PortState, PortResult
+from models import ScanType, PortState, PortResult, HostScanResult
 from service_identifier import ServiceIdentifier, COMMON_PORTS
 from port_scanner import _classify_connect_error
+from output_formatter import OutputFormatter
 
 
 class TestPortParsing(unittest.TestCase):
@@ -83,6 +86,146 @@ class TestConnectErrorClassification(unittest.TestCase):
 
     def test_unknown_error_defaults_to_closed(self):
         self.assertEqual(_classify_connect_error(99999), PortState.CLOSED)
+
+
+class TestBatchSummary(unittest.TestCase):
+    def _create_mock_result(self, host: str, open_ports_dict: dict) -> HostScanResult:
+        result = HostScanResult(
+            host=host,
+            scan_type=ScanType.TCP_CONNECT,
+            ports=[1, 2, 3, 4, 5],
+        )
+        for port, service in open_ports_dict.items():
+            result.results.append(PortResult(
+                port=port,
+                state=PortState.OPEN,
+                service=service,
+                response_time=1.23,
+            ))
+        for port in [p for p in [1, 2, 3, 4, 5] if p not in open_ports_dict]:
+            result.results.append(PortResult(
+                port=port,
+                state=PortState.CLOSED,
+                service="unknown",
+            ))
+        return result
+
+    def test_single_host_summary(self):
+        formatter = OutputFormatter()
+        results = [self._create_mock_result("host1", {80: "HTTP", 443: "HTTPS"})]
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            formatter.print_batch_summary(results)
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("【按主机查看】", output)
+        self.assertIn("host1", output)
+        self.assertNotIn("【按端口查看】", output)
+
+    def test_multi_host_summary_has_three_views(self):
+        formatter = OutputFormatter()
+        results = [
+            self._create_mock_result("host1", {80: "HTTP"}),
+            self._create_mock_result("host2", {80: "HTTP", 22: "SSH"}),
+        ]
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            formatter.print_batch_summary(results)
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("【按主机查看】", output)
+        self.assertIn("【按端口查看】", output)
+        self.assertIn("【按服务查看】", output)
+
+    def test_by_port_view_sorted_by_host_count(self):
+        formatter = OutputFormatter()
+        results = [
+            self._create_mock_result("host1", {80: "HTTP", 22: "SSH", 443: "HTTPS"}),
+            self._create_mock_result("host2", {80: "HTTP", 443: "HTTPS"}),
+            self._create_mock_result("host3", {80: "HTTP"}),
+        ]
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            formatter.print_batch_summary(results)
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+
+        port_section_start = output.index("【按端口查看】")
+        port_section = output[port_section_start:]
+
+        lines = port_section.strip().split("\n")
+        port_lines = [
+            line for line in lines
+            if line.strip() and not line.startswith("─")
+            and not line.startswith("【")
+            and not line.startswith("端口")
+            and not line.startswith("---")
+        ]
+
+        ports_in_order = []
+        for line in port_lines:
+            parts = line.split()
+            if parts and parts[0].isdigit():
+                ports_in_order.append(int(parts[0]))
+
+        self.assertEqual(ports_in_order[0], 80)
+        self.assertEqual(ports_in_order[1], 443)
+        self.assertEqual(ports_in_order[2], 22)
+
+    def test_by_service_view_aggregates_correctly(self):
+        formatter = OutputFormatter()
+        results = [
+            self._create_mock_result("host1", {80: "HTTP", 8080: "HTTP-Proxy"}),
+            self._create_mock_result("host2", {80: "HTTP", 443: "HTTPS"}),
+            self._create_mock_result("host3", {8080: "HTTP-Proxy"}),
+        ]
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            formatter.print_batch_summary(results)
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("HTTP", output)
+        self.assertIn("HTTPS", output)
+        self.assertIn("HTTP-Proxy", output)
+
+    def test_batch_mode_progress(self):
+        formatter = OutputFormatter()
+        formatter.set_batch_mode(total_hosts=3, ports_per_host=100)
+
+        self.assertTrue(formatter._batch_mode)
+        self.assertEqual(formatter._total_hosts, 3)
+        self.assertEqual(formatter._ports_per_host, 100)
+
+        formatter.start_host(1, "host1")
+        formatter.finish_host(5)
+
+        self.assertEqual(formatter._hosts_done, 1)
+        self.assertEqual(formatter._cumulative_open, 5)
+
+    def test_single_host_batch_mode_disabled(self):
+        formatter = OutputFormatter()
+        formatter.set_batch_mode(total_hosts=1, ports_per_host=100)
+        self.assertFalse(formatter._batch_mode)
 
 
 class TestServiceIdentifier(unittest.TestCase):
